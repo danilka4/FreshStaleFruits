@@ -47,7 +47,7 @@ load.image(paste(fresh_apple_dir, fresh_apple[56], sep = ''))
 ```
 Let's reduce all the images to, say, $20 \times 20$ to make sizing consistent and reduce computation time. This is especially needed since we are working with rgb images
 ```{r}
-new_dim <- 20
+new_dim <- 60
 resized_test_image <- resize(test_image, new_dim, new_dim)
 plot(resized_test_image)
 ```
@@ -63,12 +63,13 @@ print(categories)
 ### Dataframe creation
 We have 6 fresh labels, the text file that has all the labels, and then the 6 stale labels. We can take out the text file and then create a massive dataframe with the pixel values adding the and resizing. A function will be made to convert CMYK images to RGB images since those are in the dataset provided.
 ```{r}
-cmyk_to_rgb <- function(v) {
-  ret_v <- vector(length = 1200)
-  for (i in 1:400) {
-    ret_v[i] <- (1 - v[i]) * (1 - v[1200 + i])
-    ret_v[i + 400] <- (1 - v[400 + i]) * (1 - v[1200 + i])
-    ret_v[i + 800] <- (1 - v[800 + i]) * (1 - v[1200 + i])
+cmyk_to_rgb <- function(v, dim) {
+  square <- dim * dim 
+  ret_v <- vector(length = 3 * square)
+  for (i in 1:square) {
+    ret_v[i] <- (1 - v[i]) * (1 - v[3 * square + i])
+    ret_v[i + square] <- (1 - v[square + i]) * (1 - v[3 * square + i])
+    ret_v[i + 2 * square] <- (1 - v[2 * square + i]) * (1 - v[3 * square + i])
   }
   return(ret_v)
 }
@@ -85,16 +86,15 @@ for (i in 1:length(category)) {
   out <- data.frame(matrix(NA, nrow = len, ncol = new_dim * new_dim * 3))
   for (j in 1:len) {
     imag <- load.image(paste(path, image_names[j], sep = ''))
-    imag <- resize(imag, new_dim, new_dim) # TODO: figure out how to turn cmyk images to rgb
+    imag <- resize(imag, new_dim, new_dim) 
     imag <- as.vector(imag)
-    if (length(imag) > 1200) {
-      imag <- cmyk_to_rgb(imag)
+    if (length(imag) > new_dim * new_dim * 3) {
+      imag <- cmyk_to_rgb(imag, new_dim)
     }
     out[j,] <- t(imag)
   }
   # adds FSF = Fresh/Stale Food, FS = Fresh/Stale, Food = Type of Fruit
-  out <- cbind(FSF = category[i], FS = substring(category[i], 1, 5), 
-               Food = substring(category[i], 7), out) 
+  out <- cbind(category[i], out) 
   total <- rbind(total, out)
 }
 print(Sys.time() - start_time)
@@ -102,15 +102,25 @@ print(Sys.time() - start_time)
 The way this dataframe is set up whether it's fresh or stale will be written in the first state column. We can now split the dataset into training and testing data
 ```{r}
 set.seed(4761)
+total <- total[sample(1:nrow(total)),]
 indices <- sort(sample(nrow(total), nrow(total) * 0.75))
-train_x <- total[indices, 4:ncol(total)]
-test_x <- total[-indices, 4:ncol(total)]
-train_y_FSF <- total[indices, 1]
-test_y_FSF <- total[-indices, 1]
-train_y_FS <- total[indices, 2]
-test_y_FS <- total[-indices, 2]
-train_y_Food <- total[indices, 3]
-test_y_Food <- total[-indices, 3]
+fruit_state_names <- total[,1]
+y <- matrix(0, length(fruit_state_names), 12)
+for (i in 1:length(fruit_state_names)) {
+  for (j in 1:12) {
+    if (fruit_state_names[i] == category[j]) {
+      y[i,j] = 1
+    }
+  }
+}
+start_time <- Sys.time()
+total <- array(unlist(total[,2:ncol(total)]), 
+               dim = c(nrow(total), new_dim, new_dim, 3))
+train_x <- total[indices,,,]
+test_x <- total[-indices,,,]
+train_y <- y[indices,]
+test_y <- y[-indices,]
+print(Sys.time() - start_time)
 ```
 
 # KNN-Classification
@@ -120,75 +130,56 @@ Now let's create a few different models to test how well each can identify each 
 ## Complete Entry
 
 First lets try out different k values for when the different categories are the type of fruit in addition to whether it's fresh or stale.
-```{r State+Type of Food}
-set.seed(4761)
-k <- data.frame(k = seq(from = 1, to = 21, by = 1))
-train_control <- trainControl(method = "cv", number = 5)
-selecting_k <- train(x = train_x, y = train_y_FSF, method = "knn", tuneGrid = k, trControl = train_control)
-k_accuracies <- selecting_k$results %>% select(k, Accuracy)
-ggplot(k_accuracies, aes(x = k, y = Accuracy)) + geom_point() + geom_line()
+```{r}
+shape <- 3 * new_dim * new_dim
+
+model <- keras_model_sequential() %>% 
+  layer_conv_2d(filters = 64, kernel_size = 3, activation = "relu", 
+                input_shape = c(new_dim, new_dim, 3)) %>% 
+  layer_conv_2d(filters = 64, kernel_size = 3, activation = "relu") %>% 
+  layer_max_pooling_2d(c(2,2)) %>% 
+  layer_dropout(0.3) %>% 
+  layer_conv_2d(filters = 128, kernel_size = 3, activation = "relu") %>% 
+  layer_flatten() %>% 
+  layer_dense(units = 256, activation = "relu") %>% 
+  layer_dense(units = 12, activation = "softmax")
+  
+summary(model)
+  
+```
+  layer_max_pooling_2d(pool_size = c(2,2)) %>% 
+  layer_conv_2d(filters = 128, kernel_size = 2, activation = "relu") %>% 
+  layer_dropout(rate = 0.3) %>% 
+  layer_conv_2d(filters = 128, kernel_size = 2, activation = "relu") %>% 
+  layer_max_pooling_2d(pool_size = c(2,2)) %>% 
+  layer_conv_2d(filters = 128, kernel_size = 2, activation = "relu") %>% 
+  layer_dropout(rate = 0.3) %>% 
+```{r}
+model <- model %>% compile(
+  loss = "categorical_crossentropy",
+  optimizer = optimizer_rmsprop(),
+  metrics = c("accuracy")
+)
 ```
 
-It can be seen that a $k = 1$ is ideal. There was no up-sampling methods employed so there is no risk of over-sampling. Lets see how the model works with the test data.
 ```{r}
 set.seed(4761)
-chosen_k <- data.frame(k = 1)
-start_time <- Sys.time()
-knn_model <- train(x = train_x, train_y_FSF, method = "knn", tuneGrid = chosen_k)
-print(Sys.time() - start_time)
-predicted_y <- predict(knn_model, test_x)
-results <- confusionMatrix(data = predicted_y, reference = as.factor(test_y_FSF))
-results
+start_time <- Sys.time();
+history <- model %>% 
+  fit(
+    train_x, train_y,
+    epochs = 20, batch_size = 128,
+    validation_split = 0.2
+  )
+end_time <- Sys.time()
+end_time - start_time
 ```
 
-## Fresh/Stale Classifier
-Now let's do the same but with just the knowledge that the fruit is fresh or stale.
-```{r State}
-set.seed(4761)
-k <- data.frame(k = seq(from = 1, to = 21, by = 1))
-train_control <- trainControl(method = "cv", number = 5)
-start_time <- Sys.time()
-selecting_k <- train(x = train_x, y = train_y_FS, method = "knn", tuneGrid = k, trControl = train_control)
-print(Sys.time() - start_time)
-k_accuracies <- selecting_k$results %>% select(k, Accuracy)
-ggplot(k_accuracies, aes(x = k, y = Accuracy)) + geom_point() + geom_line()
-```
-
-It can be seen that a $k = 3$ is ideal.
 ```{r}
-set.seed(4761)
-chosen_k <- data.frame(k = 3)
-start_time <- Sys.time()
-knn_model <- train(x = train_x, train_y_FS, method = "knn", tuneGrid = chosen_k)
-print(Sys.time() - start_time)
-predicted_y <- predict(knn_model, test_x)
-results <- confusionMatrix(data = predicted_y, reference = as.factor(test_y_FS))
-results
+plot(history)
 ```
 
-## Fruit Identification
-
-Finally let's see how accurately we can tune a model for identification of the type of fruit.
-```{r Type of Food}
-set.seed(4761)
-k <- data.frame(k = seq(from = 1, to = 21, by = 1))
-train_control <- trainControl(method = "cv", number = 5)
-start_time <- Sys.time()
-selecting_k <- train(x = train_x, y = train_y_Food, method = "knn", tuneGrid = k, trControl = train_control)
-print(Sys.time() - start_time)
-k_accuracies <- selecting_k$results %>% select(k, Accuracy)
-ggplot(k_accuracies, aes(x = k, y = Accuracy)) + geom_point() + geom_line()
-```
-
-
-It can be seen that a $k = 1$ is ideal.
 ```{r}
-set.seed(4761)
-chosen_k <- data.frame(k = 1)
-start_time <- Sys.time()
-knn_model <- train(x = train_x, train_y_Food, method = "knn", tuneGrid = chosen_k)
-print(Sys.time() - start_time)
-predicted_y <- predict(knn_model, test_x)
-results <- confusionMatrix(data = predicted_y, reference = as.factor(test_y_Food))
-results
+evaluate(model, test_x, test_y)
 ```
+
